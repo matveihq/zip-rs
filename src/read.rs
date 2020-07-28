@@ -16,15 +16,35 @@ use crate::cp437::FromCp437;
 use crate::types::{DateTime, System, ZipFileData};
 use byteorder::{LittleEndian, ReadBytesExt};
 
-#[cfg(any(
+#[cfg(feature = "async")]
+use core::pin::Pin;
+#[cfg(feature = "async")]
+use futures::{
+    compat::Compat01As03,
+    io::{Error,AsyncBufRead},
+    task::{Context, Poll},
+    AsyncRead,
+};
+#[cfg(feature = "async")]
+use pin_project::{pin_project, pinned_drop};
+
+#[cfg(all(any(
     feature = "deflate",
     feature = "deflate-miniz",
     feature = "deflate-zlib"
-))]
+), not(feature="async")))]
 use flate2::read::DeflateDecoder;
+#[cfg(all(any(
+    feature = "deflate",
+    feature = "deflate-miniz",
+    feature = "deflate-zlib"
+), feature="async"))]
+use async_compression::futures::bufread::DeflateDecoder;
 
-#[cfg(feature = "bzip2")]
+#[cfg(all(feature = "bzip2", not(feature="async")))]
 use bzip2::read::BzDecoder;
+#[cfg(all(feature = "bzip2", feature="async"))]
+use async_compression::futures::bufread::BzDecoder;
 
 mod ffi {
     pub const S_IFDIR: u32 = 0o0040000;
@@ -76,6 +96,29 @@ impl<'a> Read for CryptoReader<'a> {
     }
 }
 
+#[cfg(feature = "async")]
+impl<'a> AsyncRead for CryptoReader<'a> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        todo!();
+    }
+}
+
+#[cfg(feature = "async")]
+impl<'a> AsyncBufRead for CryptoReader<'a> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>)
+            -> Poll<io::Result<&[u8]>> {
+        todo!()
+    }
+    fn consume(self: Pin<&mut Self>, amt: usize) {
+        todo!()
+    }
+}
+
+
 impl<'a> CryptoReader<'a> {
     /// Consumes this decoder, returning the underlying reader.
     pub fn into_inner(self) -> io::Take<&'a mut dyn Read> {
@@ -86,19 +129,22 @@ impl<'a> CryptoReader<'a> {
     }
 }
 
+#[pin_project(project=ZipFileReaderProject)]
 enum ZipFileReader<'a> {
     NoReader,
-    Stored(Crc32Reader<CryptoReader<'a>>),
+    Stored(#[pin] Crc32Reader<CryptoReader<'a>>),
     #[cfg(any(
         feature = "deflate",
         feature = "deflate-miniz",
         feature = "deflate-zlib"
     ))]
-    Deflated(Crc32Reader<flate2::read::DeflateDecoder<CryptoReader<'a>>>),
+    Deflated(#[pin] Crc32Reader<DeflateDecoder<CryptoReader<'a>>>),
     #[cfg(feature = "bzip2")]
-    Bzip2(Crc32Reader<BzDecoder<CryptoReader<'a>>>),
+    Bzip2(#[pin] Crc32Reader<BzDecoder<CryptoReader<'a>>>),
 }
 
+// TODO: We want this implemented on async streams where possible too
+#[cfg(not(feature="async"))]
 impl<'a> Read for ZipFileReader<'a> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
@@ -112,6 +158,28 @@ impl<'a> Read for ZipFileReader<'a> {
             ZipFileReader::Deflated(r) => r.read(buf),
             #[cfg(feature = "bzip2")]
             ZipFileReader::Bzip2(r) => r.read(buf),
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+impl<'a> AsyncRead for ZipFileReader<'a> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &mut [u8],
+    ) -> Poll<Result<usize, Error>> {
+        match self.project() {
+            ZipFileReaderProject::NoReader => panic!("ZipFileReader was in an invalid state"),
+            ZipFileReaderProject::Stored(r) => r.poll_read(cx, buf),
+            #[cfg(any(
+                feature = "deflate",
+                feature = "deflate-miniz",
+                feature = "deflate-zlib"
+            ))]
+            ZipFileReaderProject::Deflated(r) => r.poll_read(cx, buf),
+            #[cfg(feature = "bzip2")]
+            ZipFileReaderProject::Bzip2(r) => r.poll_read(cx, buf),
         }
     }
 }
@@ -135,8 +203,10 @@ impl<'a> ZipFileReader<'a> {
 }
 
 /// A struct for reading a zip file
+#[pin_project(PinnedDrop,project=ZipFileProject)]
 pub struct ZipFile<'a> {
     data: Cow<'a, ZipFileData>,
+    #[pin]
     reader: ZipFileReader<'a>,
 }
 
@@ -317,6 +387,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
     /// # Platform-specific behaviour
     ///
     /// On unix systems permissions from the zip file are preserved, if they exist.
+    #[cfg(not(feature = "async"))]
     pub fn extract<P: AsRef<Path>>(&mut self, directory: P) -> ZipResult<()> {
         for i in 0..self.len() {
             let mut file = self.by_index(i)?;
@@ -694,14 +765,27 @@ impl<'a> ZipFile<'a> {
     }
 }
 
+#[cfg(not(feature="async"))]
 impl<'a> Read for ZipFile<'a> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.reader.read(buf)
     }
 }
 
-impl<'a> Drop for ZipFile<'a> {
-    fn drop(&mut self) {
+#[cfg(feature = "async")]
+impl<'a> AsyncRead for ZipFile<'a> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &mut [u8],
+    ) -> Poll<Result<usize, Error>> {
+        self.project().reader.poll_read(cx, buf)
+    }
+}
+
+#[pinned_drop]
+impl<'a> PinnedDrop for ZipFile<'a> {
+    fn drop(mut self: Pin<&mut Self>) {
         // self.data is Owned, this reader is constructed by a streaming reader.
         // In this case, we want to exhaust the reader so that the next file is accessible.
         if let Cow::Owned(_) = self.data {
