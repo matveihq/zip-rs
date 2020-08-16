@@ -21,30 +21,34 @@ use core::pin::Pin;
 #[cfg(feature = "async")]
 use futures::{
     compat::Compat01As03,
-    io::{Error,AsyncBufRead},
+    io::{AsyncBufRead, Error},
     task::{Context, Poll},
     AsyncRead,
 };
 #[cfg(feature = "async")]
 use pin_project::{pin_project, pinned_drop};
 
-#[cfg(all(any(
-    feature = "deflate",
-    feature = "deflate-miniz",
-    feature = "deflate-zlib"
-), not(feature="async")))]
-use flate2::read::DeflateDecoder;
-#[cfg(all(any(
-    feature = "deflate",
-    feature = "deflate-miniz",
-    feature = "deflate-zlib"
-), feature="async"))]
+#[cfg(all(
+    any(
+        feature = "deflate",
+        feature = "deflate-miniz",
+        feature = "deflate-zlib"
+    ),
+    feature = "async"
+))]
 use async_compression::futures::bufread::DeflateDecoder;
+#[cfg(all(
+    any(
+        feature = "deflate",
+        feature = "deflate-miniz",
+        feature = "deflate-zlib"
+    ),
+    not(feature = "async")
+))]
+use flate2::read::DeflateDecoder;
 
-#[cfg(all(feature = "bzip2", not(feature="async")))]
+#[cfg(all(feature = "bzip2"))]
 use bzip2::read::BzDecoder;
-#[cfg(all(feature = "bzip2", feature="async"))]
-use async_compression::futures::bufread::BzDecoder;
 
 mod ffi {
     pub const S_IFDIR: u32 = 0o0040000;
@@ -109,15 +113,13 @@ impl<'a> AsyncRead for CryptoReader<'a> {
 
 #[cfg(feature = "async")]
 impl<'a> AsyncBufRead for CryptoReader<'a> {
-    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>)
-            -> Poll<io::Result<&[u8]>> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         todo!()
     }
     fn consume(self: Pin<&mut Self>, amt: usize) {
         todo!()
     }
 }
-
 
 impl<'a> CryptoReader<'a> {
     /// Consumes this decoder, returning the underlying reader.
@@ -129,22 +131,22 @@ impl<'a> CryptoReader<'a> {
     }
 }
 
-#[pin_project(project=ZipFileReaderProject)]
+#[cfg_attr(feature = "async", pin_project(project=ZipFileReaderProject))]
 enum ZipFileReader<'a> {
     NoReader,
-    Stored(#[pin] Crc32Reader<CryptoReader<'a>>),
+    Stored(#[cfg_attr(feature = "async", pin)] Crc32Reader<CryptoReader<'a>>),
     #[cfg(any(
         feature = "deflate",
         feature = "deflate-miniz",
         feature = "deflate-zlib"
     ))]
-    Deflated(#[pin] Crc32Reader<DeflateDecoder<CryptoReader<'a>>>),
+    Deflated(#[cfg_attr(feature = "async", pin)] Crc32Reader<DeflateDecoder<CryptoReader<'a>>>),
     #[cfg(feature = "bzip2")]
-    Bzip2(#[pin] Crc32Reader<BzDecoder<CryptoReader<'a>>>),
+    Bzip2(#[cfg_attr(feature = "async", pin)] Crc32Reader<BzDecoder<CryptoReader<'a>>>),
 }
 
 // TODO: We want this implemented on async streams where possible too
-#[cfg(not(feature="async"))]
+#[cfg(not(feature = "async"))]
 impl<'a> Read for ZipFileReader<'a> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
@@ -203,10 +205,10 @@ impl<'a> ZipFileReader<'a> {
 }
 
 /// A struct for reading a zip file
-#[pin_project(PinnedDrop,project=ZipFileProject)]
+#[cfg_attr(feature = "async",pin_project(PinnedDrop,project=ZipFileProject))]
 pub struct ZipFile<'a> {
     data: Cow<'a, ZipFileData>,
-    #[pin]
+    #[cfg_attr(feature = "async", pin)]
     reader: ZipFileReader<'a>,
 }
 
@@ -765,7 +767,6 @@ impl<'a> ZipFile<'a> {
     }
 }
 
-#[cfg(not(feature="async"))]
 impl<'a> Read for ZipFile<'a> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.reader.read(buf)
@@ -783,6 +784,7 @@ impl<'a> AsyncRead for ZipFile<'a> {
     }
 }
 
+#[cfg(feature = "async")]
 #[pinned_drop]
 impl<'a> PinnedDrop for ZipFile<'a> {
     fn drop(mut self: Pin<&mut Self>) {
