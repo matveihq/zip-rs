@@ -79,7 +79,7 @@ pub struct ZipArchive<R: Read + io::Seek> {
 #[cfg(feature = "async")]
 #[pin_project(project=AsyncZipArchiveProject)]
 #[derive(Clone, Debug)]
-pub struct AsyncZipArchive<R: AsyncRead + AsyncSeek + Unpin> {
+pub struct AsyncZipArchive<R: AsyncRead + AsyncSeek + Send + Sync + Unpin> {
     #[pin]
     reader: R,
     files: Vec<ZipFileData>,
@@ -105,8 +105,8 @@ impl<'a> Read for CryptoReader<'a> {
 #[cfg(feature = "async")]
 #[pin_project(project=AsyncCryptoReaderProject)]
 enum AsyncCryptoReader<'a> {
-    Plaintext(#[pin] futures::io::Take<Pin<&'a mut dyn AsyncRead>>),
-    ZipCrypto(#[pin] ZipCryptoReaderValid<futures::io::Take<Pin<&'a mut dyn AsyncRead>>>),
+    Plaintext(#[pin] futures::io::Take<Pin<&'a mut (dyn AsyncRead + Send + Sync)>>),
+    ZipCrypto(#[pin] ZipCryptoReaderValid<futures::io::Take<Pin<&'a mut (dyn AsyncRead + Send + Sync)>>>),
 }
 
 #[cfg(feature = "async")]
@@ -136,7 +136,7 @@ impl<'a> CryptoReader<'a> {
 #[cfg(feature = "async")]
 impl<'a> AsyncCryptoReader<'a> {
     /// Consumes this decoder, returning the underlying reader.
-    pub fn into_inner(self) -> futures::io::Take<Pin<&'a mut dyn AsyncRead>> {
+    pub fn into_inner(self) -> futures::io::Take<Pin<&'a mut (dyn AsyncRead + Send + Sync)>> {
         match self {
             Self::Plaintext(r) => r,
             Self::ZipCrypto(r) => r.into_inner(),
@@ -162,7 +162,7 @@ enum ZipFileReader<'a> {
 #[pin_project(project=AsyncZipFileReaderProject)]
 enum AsyncZipFileReader<'a> {
     NoReader,
-    Raw(#[pin] futures::io::Take<Pin<&'a mut dyn AsyncRead>>),
+    Raw(#[pin] futures::io::Take<Pin<&'a mut (dyn AsyncRead + Send + Sync)>>),
     Stored(#[pin] Crc32Reader<AsyncCryptoReader<'a>>),
     #[cfg(any(
         feature = "deflate",
@@ -324,7 +324,7 @@ fn make_reader<'a>(
 async fn make_crypto_reader_async<'a>(
     compression_method: crate::compression::CompressionMethod,
     crc32: u32,
-    reader: futures::io::Take<Pin<&'a mut dyn AsyncRead>>,
+    reader: futures::io::Take<Pin<&'a mut (dyn AsyncRead + Send + Sync)>>,
     password: Option<&[u8]>,
 ) -> ZipResult<Result<AsyncCryptoReader<'a>, InvalidPassword>> {
     #[allow(deprecated)]
@@ -679,7 +679,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
 }
 
 #[cfg(feature = "async")]
-impl<R: AsyncRead + AsyncSeek + Unpin> AsyncZipArchive<R> {
+impl<R: AsyncRead + AsyncSeek + Send + Sync + Unpin> AsyncZipArchive<R> {
     /// Read a ZIP archive, collecting the files it contains
     ///
     /// This uses the central directory record of the ZIP file, and ignores local file headers
@@ -725,7 +725,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AsyncZipArchive<R> {
 }
 
 #[cfg(feature = "async")]
-impl<R: AsyncRead + AsyncSeek + Unpin> AsyncZipArchive<R> {
+impl<R: AsyncRead + AsyncSeek + Send + Sync + Unpin> AsyncZipArchive<R> {
     /// Get the directory start offset and number of files. This is done in a
     /// separate function to ease the control flow design.
     async fn get_directory_counts(
@@ -952,7 +952,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> AsyncZipArchive<R> {
             .seek(io::SeekFrom::Start(data.data_start))
             .await?;
         let limit_reader =
-            (Pin::new(&mut self.reader) as Pin<&'a mut dyn AsyncRead>).take(data.compressed_size);
+            (Pin::new(&mut self.reader) as Pin<&'a mut (dyn AsyncRead + Send + Sync)>).take(data.compressed_size);
 
         match make_crypto_reader_async(data.compression_method, data.crc32, limit_reader, password)
             .await
@@ -1371,7 +1371,7 @@ impl<'a> AsyncZipFile<'a> {
         &mut self.reader
     }
 
-    pub(crate) fn get_raw_reader(&mut self) -> &mut (dyn AsyncRead + Unpin) {
+    pub(crate) fn get_raw_reader(&mut self) -> &mut (dyn AsyncRead + Send + Sync + Unpin) {
         if let AsyncZipFileReader::NoReader = self.reader {
             let crypto_reader = self.crypto_reader.take().expect("Invalid reader state");
             self.reader = AsyncZipFileReader::Raw(crypto_reader.into_inner())
@@ -1642,7 +1642,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
 /// In contrast, there is no drop implementation in the asynchronous implementation.
 /// You must call `AsyncReadExt::read_to_end` or similar to drain each file before reusing the reader.
 #[cfg(feature = "async")]
-pub async fn read_zipfile_from_stream_async<'a, R: AsyncRead + Unpin>(
+pub async fn read_zipfile_from_stream_async<'a, R: AsyncRead + Send + Sync + Unpin>(
     reader: &'a mut R,
 ) -> ZipResult<Option<AsyncZipFile<'_>>> {
     let mut r = reader.compat_mut();
@@ -1715,7 +1715,7 @@ pub async fn read_zipfile_from_stream_async<'a, R: AsyncRead + Unpin>(
     }
 
     let limit_reader =
-        (Pin::new(reader) as Pin<&'a mut dyn AsyncRead>).take(result.compressed_size as u64);
+        (Pin::new(reader) as Pin<&'a mut (dyn AsyncRead + Send + Sync)>).take(result.compressed_size as u64);
 
     let result_crc32 = result.crc32;
     let result_compression_method = result.compression_method;
