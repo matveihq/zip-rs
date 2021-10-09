@@ -35,7 +35,7 @@ futures-await-test = "0.3.0"
 deflate = ["flate2/rust_backend"]
 deflate-miniz = ["flate2/default"]
 deflate-zlib = ["flate2/zlib"]
-default = ["bzip2", "deflate", "time"]
+default = ["async", "bzip2", "deflate", "time"]
 async = ["futures", "pin-project", "tokio", "async-compression"]
 
 [[bench]]
